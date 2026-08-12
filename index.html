@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HypervisorJS - WebAssembly x86 PC Emulator</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- Authentic IBM VGA CP437 Font for Pixel-Perfect BIOS & Text-Mode Rendering -->
+    <link href="https://fonts.cdnfonts.com/css/px437-ibm-vga8" rel="stylesheet">
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- v86 x86 Emulator Library with fallback -->
+    <script src="https://cdn.jsdelivr.net/npm/v86@latest/build/libv86.js" onerror="this.onerror=null;this.src='https://copy.sh/v86/build/libv86.js';"></script>
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f0fdf4',
+                            100: '#dcfce7',
+                            400: '#4ade80',
+                            500: '#22c55e',
+                            600: '#16a34a',
+                            900: '#14532d',
+                        },
+                        darkbg: '#0a0d14',
+                        darkcard: '#121722',
+                        darkborder: '#1f293d',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        /* Custom scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0a0d14;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #1f293d;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #374151;
+        }
+
+        /* Screen Canvas styling */
+        #screen_container canvas {
+            display: block;
+            margin: 0 auto;
+            max-width: 100%;
+            max-height: 100%;
+            height: auto;
+            border-radius: 4px;
+            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.8);
+            image-rendering: auto; /* Default to smooth rendering to fix VBE font distortion */
+        }
+
+        #screen_container canvas.rendering-pixelated {
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        #screen_container {
+            background-color: #000;
+            outline: none;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: safe center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Screen wrapper container-query setup */
+        #screen-wrapper {
+            container-type: inline-size;
+            container-name: vm-screen;
+        }
+
+        /* v86 Text Mode (80x25 VGA) responsiveness & zero-crop alignment fix */
+        #screen_container > div {
+            max-width: 100% !important;
+            max-height: 100% !important;
+            margin: auto !important;
+            box-sizing: border-box !important;
+            /* Container query unit (cqw) guarantees all 80 cols fit inside panel width */
+            font-size: clamp(7px, 1.8cqw, 15px) !important;
+            line-height: 1.0 !important;
+            font-family: 'Px437 IBM VGA8', 'IBM VGA 8x16', 'JetBrains Mono', 'Courier New', monospace !important;
+            text-align: left !important;
+            white-space: pre !important;
+            overflow: hidden !important;
+            letter-spacing: 0px !important;
+            font-variant-numeric: tabular-nums !important;
+        }
+
+        #screen_container * {
+            white-space: pre !important;
+            font-family: 'Px437 IBM VGA8', 'IBM VGA 8x16', 'JetBrains Mono', 'Courier New', monospace !important;
+        }
+
+        .crt-effect {
+            position: relative;
+        }
+        .crt-effect::before {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+            background-size: 100% 4px;
+            z-index: 10;
+            pointer-events: none;
+            opacity: 0.3;
+        }
+
+        /* Glowing text effects */
+        .glow-green {
+            text-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+        }
+    </style>
+</head>
+<body class="bg-darkbg text-slate-200 font-sans min-h-screen flex flex-col antialiased selection:bg-brand-500 selection:text-black">
+
+    <!-- Top Header Navigation -->
+    <header class="border-b border-darkborder bg-darkcard/80 backdrop-blur-md sticky top-0 z-40 px-4 py-3">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-brand-600 to-emerald-400 flex items-center justify-center text-slate-950 shadow-lg shadow-brand-500/20">
+                    <i data-lucide="cpu" class="w-5 h-5 stroke-[2.5]"></i>
+                </div>
+                <div>
+                    <div class="flex items-center space-x-2">
+                        <h1 class="font-bold text-lg text-white tracking-wide">HypervisorJS</h1>
+                        <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 font-semibold">WebAssembly x86</span>
+                    </div>
+                    <p class="text-xs text-slate-400">Pure Browser OS Virtualization & Persistent Storage</p>
+                </div>
+            </div>
+
+            <!-- VM Status Badges & Quick Action Controls -->
+            <div class="flex items-center space-x-3">
+                <div id="vm-status-badge" class="hidden sm:flex items-center space-x-2 px-3 py-1 rounded-full bg-slate-800/80 border border-slate-700 text-xs">
+                    <span id="status-indicator" class="w-2 h-2 rounded-full bg-slate-500"></span>
+                    <span id="status-text" class="font-mono text-slate-300">SYSTEM OFFLINE</span>
+                </div>
+
+                <button id="btn-power" onclick="togglePower()" class="flex items-center space-x-2 px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-slate-950 font-semibold text-sm transition-a[...]
