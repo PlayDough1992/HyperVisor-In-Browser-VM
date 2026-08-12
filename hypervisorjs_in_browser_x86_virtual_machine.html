@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HypervisorJS - WebAssembly x86 PC Emulator</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- Authentic IBM VGA CP437 Font for Pixel-Perfect BIOS & Text-Mode Rendering -->
+    <link href="https://fonts.cdnfonts.com/css/px437-ibm-vga8" rel="stylesheet">
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- v86 x86 Emulator Library with fallback -->
+    <script src="https://cdn.jsdelivr.net/npm/v86@latest/build/libv86.js" onerror="this.onerror=null;this.src='https://copy.sh/v86/build/libv86.js';"></script>
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f0fdf4',
+                            100: '#dcfce7',
+                            400: '#4ade80',
+                            500: '#22c55e',
+                            600: '#16a34a',
+                            900: '#14532d',
+                        },
+                        darkbg: '#0a0d14',
+                        darkcard: '#121722',
+                        darkborder: '#1f293d',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        /* Custom scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0a0d14;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #1f293d;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #374151;
+        }
+
+        /* Screen Canvas styling */
+        #screen_container canvas {
+            display: block;
+            margin: 0 auto;
+            max-width: 100%;
+            max-height: 100%;
+            height: auto;
+            border-radius: 4px;
+            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.8);
+            image-rendering: auto; /* Default to smooth rendering to fix VBE font distortion */
+        }
+
+        #screen_container canvas.rendering-pixelated {
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        #screen_container {
+            background-color: #000;
+            outline: none;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: safe center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Screen wrapper container-query setup */
+        #screen-wrapper {
+            container-type: inline-size;
+            container-name: vm-screen;
+        }
+
+        /* v86 Text Mode (80x25 VGA) responsiveness & zero-crop alignment fix */
+        #screen_container > div {
+            max-width: 100% !important;
+            max-height: 100% !important;
+            margin: auto !important;
+            box-sizing: border-box !important;
+            /* Container query unit (cqw) guarantees all 80 cols fit inside panel width */
+            font-size: clamp(7px, 1.8cqw, 15px) !important;
+            line-height: 1.0 !important;
+            font-family: 'Px437 IBM VGA8', 'IBM VGA 8x16', 'JetBrains Mono', 'Courier New', monospace !important;
+            text-align: left !important;
+            white-space: pre !important;
+            overflow: hidden !important;
+            letter-spacing: 0px !important;
+            font-variant-numeric: tabular-nums !important;
+        }
+
+        #screen_container * {
+            white-space: pre !important;
+            font-family: 'Px437 IBM VGA8', 'IBM VGA 8x16', 'JetBrains Mono', 'Courier New', monospace !important;
+        }
+
+        .crt-effect {
+            position: relative;
+        }
+        .crt-effect::before {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+            background-size: 100% 4px;
+            z-index: 10;
+            pointer-events: none;
+            opacity: 0.3;
+        }
+
+        /* Glowing text effects */
+        .glow-green {
+            text-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+        }
+    </style>
+</head>
+<body class="bg-darkbg text-slate-200 font-sans min-h-screen flex flex-col antialiased selection:bg-brand-500 selection:text-black">
+
+    <!-- Top Header Navigation -->
+    <header class="border-b border-darkborder bg-darkcard/80 backdrop-blur-md sticky top-0 z-40 px-4 py-3">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-brand-600 to-emerald-400 flex items-center justify-center text-slate-950 shadow-lg shadow-brand-500/20">
+                    <i data-lucide="cpu" class="w-5 h-5 stroke-[2.5]"></i>
+                </div>
+                <div>
+                    <div class="flex items-center space-x-2">
+                        <h1 class="font-bold text-lg text-white tracking-wide">HypervisorJS</h1>
+                        <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 font-semibold">WebAssembly x86</span>
+                    </div>
+                    <p class="text-xs text-slate-400">Pure Browser OS Virtualization & Persistent Storage</p>
+                </div>
+            </div>
+
+            <!-- VM Status Badges & Quick Action Controls -->
+            <div class="flex items-center space-x-3">
+                <div id="vm-status-badge" class="hidden sm:flex items-center space-x-2 px-3 py-1 rounded-full bg-slate-800/80 border border-slate-700 text-xs">
+                    <span id="status-indicator" class="w-2 h-2 rounded-full bg-slate-500"></span>
+                    <span id="status-text" class="font-mono text-slate-300">SYSTEM OFFLINE</span>
+                </div>
+
+                <button id="btn-power" onclick="togglePower()" class="flex items-center space-x-2 px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-slate-950 font-semibold text-sm transition-all shadow-lg shadow-brand-600/20 active:scale-95">
+                    <i data-lucide="power" class="w-4 h-4"></i>
+                    <span id="power-btn-text">Boot VM</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Workspace Grid -->
+    <main class="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+        <!-- LEFT COLUMN: VM Control, Mounts & Hardware Specs (4 cols) -->
+        <div class="lg:col-span-4 space-y-6">
+
+            <!-- Card 1: Virtual Hardware Setup -->
+            <div class="bg-darkcard border border-darkborder rounded-xl p-5 shadow-xl space-y-5">
+                <div class="flex items-center justify-between border-b border-darkborder pb-3">
+                    <div class="flex items-center space-x-2">
+                        <i data-lucide="sliders" class="w-4 h-4 text-brand-400"></i>
+                        <h2 class="font-semibold text-white text-sm">Virtual Hardware Config</h2>
+                    </div>
+                    <span class="text-xs font-mono text-slate-400">x86 PC Architecture</span>
+                </div>
+
+                <!-- Boot Image Source Selector -->
+                <div class="space-y-2">
+                    <label class="text-xs font-medium text-slate-300 flex items-center justify-between">
+                        <span>Select Operating System / Image</span>
+                        <i data-lucide="disc" class="w-3.5 h-3.5 text-slate-400"></i>
+                    </label>
+                    <select id="preset-selector" onchange="handlePresetChange(this.value)" class="w-full bg-slate-900 border border-darkborder rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500 transition-colors">
+                        <optgroup label="Instant Built-in OS (No Download Needed)">
+                            <option value="embedded_os" selected>🚀 Built-in x86 Minimal Kernel (Instant & Offline)</option>
+                        </optgroup>
+                        <optgroup label="Preset Cloud OS Images (CDN Download)">
+                            <option value="kolibrios">KolibriOS 0.7.7 (Graphical OS in Assembly)</option>
+                            <option value="freedos">FreeDOS 1.3 (Classic x86 DOS Environment)</option>
+                            <option value="tinycore">Tiny Core Linux 32-bit (Minimal Linux GUI)</option>
+                        </optgroup>
+                        <optgroup label="Custom Image Upload">
+                            <option value="custom_file">📁 Upload ISO / IMG File from Disk...</option>
+                        </optgroup>
+                        <optgroup label="Cached Storage Drives">
+                            <option value="cached_option" id="cached-option" disabled>💾 Boot Cached Virtual HDD (0 MB)</option>
+                        </optgroup>
+                    </select>
+                </div>
+
+                <!-- Custom Upload Area (hidden by default) -->
+                <div id="custom-upload-box" class="hidden space-y-3 p-3 bg-slate-900/80 rounded-lg border border-dashed border-slate-700">
+                    <div class="text-center space-y-1">
+                        <i data-lucide="upload-cloud" class="w-6 h-6 text-brand-400 mx-auto"></i>
+                        <p class="text-xs font-medium text-slate-300">Choose ISO, IMG or Raw Disk File</p>
+                        <p class="text-[10px] text-slate-500">Supports .iso, .img, .bin, .vhd, raw sector images</p>
+                    </div>
+                    <input type="file" id="image-file-input" accept=".iso,.img,.bin,.fda,.img.gz,.vhd,.raw" onchange="handleCustomFileUpload(event)" class="w-full text-xs text-slate-400 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-brand-500/20 file:text-brand-400 hover:file:bg-brand-500/30 cursor-pointer">
+                    
+                    <!-- Drive Target Selector for Custom Images -->
+                    <div class="space-y-1 pt-1 border-t border-slate-800">
+                        <label class="text-[11px] font-medium text-slate-300 flex items-center justify-between">
+                            <span>Mount Target Drive:</span>
+                            <span id="auto-mount-badge" class="text-[9px] font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">Auto-Detect</span>
+                        </label>
+                        <select id="mount-type-selector" class="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                            <option value="auto" selected>⚡ Auto-Detect (Smart File & Size Check)</option>
+                            <option value="hda">💾 Hard Disk 0 (HDA - Drive 0x80 / Int 13h MBR)</option>
+                            <option value="fda">🪪 Floppy Disk 0 (FDA - Drive 0x00 / 1.44MB Bootloader)</option>
+                            <option value="cdrom">💿 CD-ROM Drive (CDROM - ISO9660 El Torito)</option>
+                        </select>
+                    </div>
+
+                    <!-- 64-Bit Architecture Warning Alert Box -->
+                    <div id="arch-warning-box" class="hidden p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-lg text-[11px] text-amber-300 space-y-1">
+                        <div class="flex items-center space-x-1.5 font-bold text-amber-400">
+                            <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i>
+                            <span>64-Bit (AMD64) ISO Detected</span>
+                        </div>
+                        <p class="leading-tight text-[10px] text-amber-200/90">
+                            HypervisorJS emulates a <strong>32-bit x86 (i686) CPU</strong>. 64-bit kernels hang at <em>"Loading kernel initial disk..."</em> when switching to 64-bit Long Mode. Please upload a <strong>32-bit (i386 / i686) ISO</strong>!
+                        </p>
+                    </div>
+                </div>
+
+                <!-- RAM Allocation Slider -->
+                <div class="space-y-2">
+                    <div class="flex justify-between items-center text-xs">
+                        <span class="text-slate-300 font-medium">Virtual Memory (Wasm RAM)</span>
+                        <span id="ram-display" class="font-mono text-brand-400 font-bold">128 MB</span>
+                    </div>
+                    <input type="range" id="ram-slider" min="32" max="2048" step="32" value="128" oninput="updateRamDisplay(this.value)" class="w-full accent-brand-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer">
+                    <div class="flex justify-between text-[10px] text-slate-500 font-mono">
+                        <span>32MB</span>
+                        <span>512MB</span>
+                        <span>1024MB</span>
+                        <span>2048MB</span>
+                    </div>
+                </div>
+
+                <!-- Advanced Options Toggle -->
+                <div class="grid grid-cols-2 gap-3 pt-1">
+                    <div class="bg-slate-900/60 p-2.5 rounded-lg border border-darkborder flex items-center justify-between">
+                        <span class="text-xs text-slate-300">VGA BIOS</span>
+                        <span class="text-[10px] font-mono bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20">Standard</span>
+                    </div>
+                    <div class="bg-slate-900/60 p-2.5 rounded-lg border border-darkborder flex items-center justify-between">
+                        <span class="text-xs text-slate-300">SoundBlaster</span>
+                        <span class="text-[10px] font-mono bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20">Emulated</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card 2: Virtual Hard Drive & IndexedDB Persistence Manager -->
+            <div class="bg-darkcard border border-darkborder rounded-xl p-5 shadow-xl space-y-4">
+                <div class="flex items-center justify-between border-b border-darkborder pb-3">
+                    <div class="flex items-center space-x-2">
+                        <i data-lucide="hard-drive" class="w-4 h-4 text-emerald-400"></i>
+                        <h2 class="font-semibold text-white text-sm">Persistent Disk Cache (IndexedDB)</h2>
+                    </div>
+                    <span id="storage-usage-badge" class="text-[10px] font-mono text-slate-400">0 MB used</span>
+                </div>
+
+                <p class="text-xs text-slate-400 leading-relaxed">
+                    Changes made during VM execution (installs, files created) are stored in modern browser memory & synced to <strong class="text-slate-200">IndexedDB storage</strong>.
+                </p>
+
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between bg-slate-900 p-3 rounded-lg border border-darkborder">
+                        <div class="flex items-center space-x-3">
+                            <i data-lucide="database" class="w-5 h-5 text-brand-400"></i>
+                            <div>
+                                <p class="text-xs font-medium text-slate-200" id="hdd-status-title">Virtual Hard Disk 0</p>
+                                <p class="text-[10px] text-slate-500 font-mono" id="hdd-status-detail">Ready (Blank 16MB Sparse Disk)</p>
+                            </div>
+                        </div>
+                        <span class="w-2 h-2 rounded-full bg-brand-500 animate-pulse"></span>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-2">
+                        <button onclick="downloadDiskImage()" class="flex items-center justify-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 rounded-lg transition border border-slate-700">
+                            <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                            <span>Export .IMG</span>
+                        </button>
+                        <button onclick="clearDiskCache()" class="flex items-center justify-center space-x-1.5 px-3 py-2 bg-rose-900/30 hover:bg-rose-900/50 text-rose-300 text-xs rounded-lg transition border border-rose-800/40">
+                            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                            <span>Wipe Cache</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card 3: VM Live Performance Metrics -->
+            <div class="bg-darkcard border border-darkborder rounded-xl p-5 shadow-xl space-y-3">
+                <div class="flex items-center justify-between border-b border-darkborder pb-2">
+                    <span class="text-xs font-semibold text-slate-300 flex items-center space-x-1.5">
+                        <i data-lucide="activity" class="w-3.5 h-3.5 text-cyan-400"></i>
+                        <span>Emulation Telemetry</span>
+                    </span>
+                    <span class="text-[10px] font-mono text-cyan-400" id="emulated-mhz">-- MHz</span>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3 text-center">
+                    <div class="bg-slate-900 p-2.5 rounded-lg border border-darkborder">
+                        <p class="text-[10px] text-slate-500 uppercase font-mono">Instructions</p>
+                        <p id="instr-count" class="text-xs font-bold font-mono text-slate-200">0</p>
+                    </div>
+                    <div class="bg-slate-900 p-2.5 rounded-lg border border-darkborder">
+                        <p class="text-[10px] text-slate-500 uppercase font-mono">Wasm Memory</p>
+                        <p id="wasm-mem-display" class="text-xs font-bold font-mono text-slate-200">128 MB Allocated</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- RIGHT COLUMN: VM Screen Display Canvas + Controls (8 cols) -->
+        <div class="lg:col-span-8 flex flex-col space-y-4">
+
+            <!-- Display Frame Container -->
+            <div class="bg-darkcard border border-darkborder rounded-xl p-4 shadow-2xl flex flex-col flex-1">
+
+                <!-- Display Toolbar -->
+                <div class="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3 border-b border-darkborder">
+                    <div class="flex items-center space-x-2">
+                        <span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+                        <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+                        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                        <span class="text-xs font-mono text-slate-400 ml-2">VGA Output [720x400 / Graphical]</span>
+                    </div>
+
+                    <!-- Screen Tools -->
+                    <div class="flex items-center space-x-2">
+                        <button onclick="toggleRenderMode()" id="render-mode-btn" title="Toggle Font/Graphic Smoothing (Fixes distorted text)" class="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-brand-400 text-xs font-mono flex items-center space-x-1 border border-slate-700">
+                            <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+                            <span class="hidden sm:inline" id="render-mode-label">Smooth Font</span>
+                        </button>
+                        <button onclick="toggleAspectMode()" id="aspect-mode-btn" title="Toggle Aspect Scaling" class="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono flex items-center space-x-1 border border-slate-700">
+                            <i data-lucide="scaling" class="w-3.5 h-3.5"></i>
+                            <span class="hidden sm:inline" id="aspect-label">Fit Aspect</span>
+                        </button>
+                        <button onclick="sendCtrlAltDel()" title="Send Ctrl+Alt+Del" class="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono flex items-center space-x-1 border border-slate-700">
+                            <i data-lucide="keyboard" class="w-3.5 h-3.5"></i>
+                            <span class="hidden sm:inline">Ctrl+Alt+Del</span>
+                        </button>
+                        <button onclick="toggleCRT()" id="crt-btn" title="Toggle CRT Scanline Overlay" class="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs border border-slate-700">
+                            <i data-lucide="tv" class="w-3.5 h-3.5"></i>
+                        </button>
+                        <button onclick="toggleFullscreen()" title="Fullscreen Screen" class="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs border border-slate-700">
+                            <i data-lucide="maximize" class="w-3.5 h-3.5"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Virtual Machine Screen Output Canvas Wrapper -->
+                <div id="screen-wrapper" class="relative flex-1 bg-black rounded-lg overflow-hidden flex items-center justify-center min-h-[360px] md:min-h-[440px]">
+
+                    <!-- Offline / Pre-Boot Splash Container -->
+                    <div id="vm-offline-splash" class="absolute inset-0 z-20 bg-gradient-to-b from-slate-900 to-black flex flex-col items-center justify-center p-6 text-center space-y-4">
+                        <div class="w-16 h-16 rounded-2xl bg-brand-500/10 border border-brand-500/30 flex items-center justify-center text-brand-400">
+                            <i data-lucide="monitor-play" class="w-8 h-8"></i>
+                        </div>
+                        <div class="max-w-md space-y-2">
+                            <h3 class="text-lg font-bold text-white">x86 Virtual Machine Ready</h3>
+                            <p class="text-xs text-slate-400 leading-relaxed">
+                                Click <span class="text-brand-400 font-semibold">"Boot VM"</span> to launch SeaBIOS and initialize the Wasm CPU interpreter inside your browser thread.
+                            </p>
+                        </div>
+                        <button onclick="togglePower()" class="px-5 py-2.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-slate-950 font-bold text-xs uppercase tracking-wider transition-all shadow-lg shadow-brand-500/20">
+                            Start Emulation Engine
+                        </button>
+                    </div>
+
+                    <!-- Lock Mouse Cursor Hint Overlay (when VM is running) -->
+                    <div id="mouse-lock-hint" class="hidden absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-slate-900/90 border border-slate-700 text-slate-300 text-[11px] px-3 py-1 rounded-full pointer-events-none shadow-lg backdrop-blur-sm">
+                        Click screen to focus keyboard & mouse (ESC to release)
+                    </div>
+
+                    <!-- Actual Screen Container used by v86 library -->
+                    <div id="screen_container" tabindex="0" onclick="focusVMScreen()" class="w-full h-full flex items-center justify-center outline-none">
+                        <!-- Canvas and Text mode elements are dynamically created by v86 here -->
+                    </div>
+                </div>
+
+                <!-- Virtual On-Screen Input Toolbar for Unresponsive Keyboard Fallback -->
+                <div class="pt-2 flex flex-wrap items-center justify-between gap-2 border-t border-darkborder/60">
+                    <span class="text-[10px] font-mono text-slate-400 flex items-center space-x-1">
+                        <i data-lucide="corner-down-left" class="w-3 h-3 text-brand-400"></i>
+                        <span>Quick Input Keys:</span>
+                    </span>
+                    <div class="flex flex-wrap items-center gap-1.5">
+                        <button onclick="handleClipboardPaste()" title="Paste Clipboard Text from Host (Ctrl+V)" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400 text-[11px] font-mono border border-slate-700 flex items-center space-x-1 active:bg-emerald-500 active:text-slate-950">
+                            <i data-lucide="clipboard-paste" class="w-3 h-3"></i>
+                            <span>Paste (Ctrl+V)</span>
+                        </button>
+                        <button onclick="sendKeyScancode(0x1C)" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-brand-400 text-[11px] font-mono border border-slate-700 active:bg-brand-500 active:text-slate-950">Enter ↵</button>
+                        <button onclick="sendKeyScancode(0x0F)" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono border border-slate-700">Tab ⇥</button>
+                        <button onclick="sendKeyScancode(0x39)" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono border border-slate-700">Space ␣</button>
+                        <button onclick="sendKeyScancode(0x0E)" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono border border-slate-700">Backspace ⌫</button>
+                        <button onclick="sendKeyScancode(0x01)" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono border border-slate-700">Esc</button>
+                    </div>
+                </div>
+
+                <!-- Bottom Screen Controls & Mouse Lock Switch -->
+                <div class="flex items-center justify-between pt-3 text-xs text-slate-400">
+                    <div class="flex items-center space-x-2">
+                        <button onclick="lockMouse()" class="flex items-center space-x-1 px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-darkborder text-slate-300">
+                            <i data-lucide="mouse-pointer" class="w-3.5 h-3.5 text-brand-400"></i>
+                            <span>Capture Mouse</span>
+                        </button>
+                        <button onclick="pauseResumeVM()" id="pause-btn" disabled class="flex items-center space-x-1 px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-darkborder text-slate-400 disabled:opacity-50">
+                            <i data-lucide="pause" class="w-3.5 h-3.5"></i>
+                            <span id="pause-text">Pause</span>
+                        </button>
+                        <button onclick="resetVM()" id="reset-btn" disabled class="flex items-center space-x-1 px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-darkborder text-slate-400 disabled:opacity-50">
+                            <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+                            <span>Reset</span>
+                        </button>
+                    </div>
+
+                    <div class="font-mono text-[11px] text-slate-500 hidden sm:block">
+                        PS/2 Keyboard & Mouse Mouse
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tabs Console Panel: Serial UART Output / Architecture Info -->
+            <div class="bg-darkcard border border-darkborder rounded-xl p-4 shadow-xl space-y-3">
+                <div class="flex items-center justify-between border-b border-darkborder pb-2">
+                    <div class="flex space-x-4">
+                        <button onclick="switchTab('serial')" id="tab-btn-serial" class="text-xs font-semibold pb-2 border-b-2 border-brand-500 text-brand-400 flex items-center space-x-1.5">
+                            <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+                            <span>Serial UART Terminal</span>
+                        </button>
+                        <button onclick="switchTab('arch')" id="tab-btn-arch" class="text-xs font-semibold pb-2 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center space-x-1.5">
+                            <i data-lucide="info" class="w-3.5 h-3.5"></i>
+                            <span>How Browser VMs Work</span>
+                        </button>
+                    </div>
+                    <button onclick="clearSerialLog()" class="text-[10px] text-slate-400 hover:text-slate-200 font-mono">Clear Console</button>
+                </div>
+
+                <!-- Tab 1: Serial Output Log -->
+                <div id="tab-content-serial" class="space-y-2">
+                    <pre id="serial-output" class="bg-black border border-darkborder p-3 rounded-lg font-mono text-xs text-emerald-400 h-32 overflow-y-auto whitespace-pre-wrap leading-relaxed">[HypervisorJS] System initialized. Ready to boot x86 instruction set engine.</pre>
+                </div>
+
+                <!-- Tab 2: Technical Explanation -->
+                <div id="tab-content-arch" class="hidden text-xs text-slate-300 leading-relaxed space-y-3 p-1">
+                    <p>
+                        <strong class="text-white">Is running an OS in HTML possible? Yes!</strong> Here is how the browser virtualization stack works:
+                    </p>
+                    <ul class="grid grid-cols-1 md:grid-cols-2 gap-3 font-mono text-[11px]">
+                        <li class="bg-slate-900 p-2.5 rounded border border-darkborder">
+                            <span class="text-brand-400 font-bold">1. CPU & Instruction Set:</span> WebAssembly JIT-translates x86 opcodes directly into WebAssembly bytecode executed at near-native speed.
+                        </li>
+                        <li class="bg-slate-900 p-2.5 rounded border border-darkborder">
+                            <span class="text-emerald-400 font-bold">2. System Memory (RAM):</span> A Javascript <code class="text-amber-300">ArrayBuffer</code> handles physical memory addressing (32MB to 512MB).
+                        </li>
+                        <li class="bg-slate-900 p-2.5 rounded border border-darkborder">
+                            <span class="text-cyan-400 font-bold">3. Disk Persistence:</span> Sectors written to virtual HDDs are intercepted and written to <code class="text-amber-300">IndexedDB</code> storage across sessions.
+                        </li>
+                        <li class="bg-slate-900 p-2.5 rounded border border-darkborder">
+                            <span class="text-purple-400 font-bold">4. Video & Audio:</span> VGA framebuffers render onto an HTML5 <code class="text-amber-300">&lt;canvas&gt;</code>, and SoundBlaster audio routes to WebAudio API.
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- Notification Toast Container -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
+    <script>
+        // Global Hypervisor State
+        let emulator = null;
+        let isRunning = false;
+        let isPaused = false;
+        let db = null;
+        let customFileBuffer = null;
+        let customFileName = "";
+        let instrCounter = 0;
+        let mhzInterval = null;
+        let isSmoothRendering = true;
+        let aspectMode = "fit"; // "fit", "stretch", "native"
+
+        // Serial Terminal & Logging Helpers (Explicitly attached to window to prevent ReferenceErrors)
+        function appendSerialLog(msg) {
+            const output = document.getElementById("serial-output");
+            if (output) {
+                output.textContent += "\n" + msg;
+                output.scrollTop = output.scrollHeight;
+            }
+        }
+        window.appendSerialLog = appendSerialLog;
+
+        function appendSerialChar(char) {
+            const output = document.getElementById("serial-output");
+            if (output) {
+                output.textContent += char;
+                output.scrollTop = output.scrollHeight;
+            }
+        }
+        window.appendSerialChar = appendSerialChar;
+
+        function clearSerialLog() {
+            const output = document.getElementById("serial-output");
+            if (output) {
+                output.textContent = "[HypervisorJS] Serial terminal cleared.";
+            }
+        }
+        window.clearSerialLog = clearSerialLog;
+
+        // Tab Navigation Helper
+        function switchTab(tabName) {
+            const serialTab = document.getElementById("tab-content-serial");
+            const archTab = document.getElementById("tab-content-arch");
+            const btnSerial = document.getElementById("tab-btn-serial");
+            const btnArch = document.getElementById("tab-btn-arch");
+
+            if (tabName === 'serial') {
+                serialTab?.classList.remove("hidden");
+                archTab?.classList.add("hidden");
+                btnSerial?.classList.add("border-brand-500", "text-brand-400");
+                btnSerial?.classList.remove("border-transparent", "text-slate-400");
+                btnArch?.classList.remove("border-brand-500", "text-brand-400");
+                btnArch?.classList.add("border-transparent", "text-slate-400");
+            } else {
+                serialTab?.classList.add("hidden");
+                archTab?.classList.remove("hidden");
+                btnArch?.classList.add("border-brand-500", "text-brand-400");
+                btnArch?.classList.remove("border-transparent", "text-slate-400");
+                btnSerial?.classList.remove("border-brand-500", "text-brand-400");
+                btnSerial?.classList.add("border-transparent", "text-slate-400");
+            }
+        }
+
+        // Notification Toast Helper
+        function showToast(message, type = 'info') {
+            const container = document.getElementById("toast-container");
+            if (!container) return;
+
+            const toast = document.createElement("div");
+            toast.className = `px-4 py-2.5 rounded-lg text-xs font-medium border shadow-lg transition-all duration-300 transform translate-y-2 opacity-0 flex items-center space-x-2 pointer-events-auto max-w-xs sm:max-w-md ${
+                type === 'error' ? 'bg-rose-950/90 text-rose-200 border-rose-800' :
+                type === 'success' ? 'bg-emerald-950/90 text-emerald-200 border-emerald-800' :
+                'bg-slate-900/95 text-slate-200 border-slate-700'
+            }`;
+
+            toast.innerHTML = `<span>${message}</span>`;
+            container.appendChild(toast);
+
+            requestAnimationFrame(() => {
+                toast.classList.remove("translate-y-2", "opacity-0");
+            });
+
+            setTimeout(() => {
+                toast.classList.add("opacity-0", "translate-y-2");
+                setTimeout(() => toast.remove(), 300);
+            }, 4000);
+        }
+
+        // Main Power Control Function
+        function togglePower() {
+            if (isRunning) {
+                stopVM();
+            } else {
+                startVM();
+            }
+        }
+
+        // Configuration Handlers
+        function handlePresetChange(val) {
+            const uploadBox = document.getElementById("custom-upload-box");
+            if (val === "custom_file") {
+                uploadBox.classList.remove("hidden");
+            } else {
+                uploadBox.classList.add("hidden");
+            }
+        }
+
+        function handleCustomFileUpload(event) {
+            const file = event.target.files && event.target.files[0];
+            if (!file) return;
+            customFileName = file.name;
+
+            // Check for 64-bit architecture in filename
+            const lowerName = file.name.toLowerCase();
+            const is64Bit = lowerName.includes("amd64") || lowerName.includes("x86_64") || lowerName.includes("x64") || lowerName.includes("64bit") || lowerName.includes("64-bit");
+
+            const warningBox = document.getElementById("arch-warning-box");
+            if (warningBox) {
+                if (is64Bit) {
+                    warningBox.classList.remove("hidden");
+                    showToast("⚠️ 64-bit (amd64) ISO detected! v86 requires a 32-bit (i386) ISO.", "error");
+                } else {
+                    warningBox.classList.add("hidden");
+                }
+            }
+
+            // Auto-detect recommended drive target
+            const badge = document.getElementById("auto-mount-badge");
+            const isIso = lowerName.endsWith(".iso");
+            const isFloppySize = file.size <= 2949120; // 2.88MB or smaller
+
+            if (isIso) {
+                if (badge) badge.innerText = "Auto: CD-ROM";
+            } else if (isFloppySize && (lowerName.includes("floppy") || lowerName.endsWith(".fda"))) {
+                if (badge) badge.innerText = "Auto: Floppy (0x00)";
+            } else {
+                if (badge) badge.innerText = "Auto: Hard Disk (0x80)";
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                customFileBuffer = e.target.result;
+                const mb = (file.size / (1024*1024)).toFixed(2);
+                showToast(`Buffered ${file.name} (${mb} MB)`, "success");
+                appendSerialLog(`[HypervisorJS] Custom image buffered: ${file.name} (${file.size} bytes)`);
+                if (is64Bit) {
+                    appendSerialLog(`[WARN] File '${file.name}' is 64-bit (amd64). v86 is a 32-bit x86 emulator.`);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        function updateRamDisplay(val) {
+            const valNum = parseInt(val);
+            const formattedText = valNum >= 1024 
+                ? `${valNum} MB (${(valNum / 1024).toFixed(valNum % 1024 === 0 ? 0 : 1)} GB)` 
+                : `${valNum} MB`;
+            document.getElementById("ram-display").innerText = formattedText;
+            document.getElementById("wasm-mem-display").innerText = formattedText + " Allocated";
+        }
+
+        // Storage Database Functions
+        function initStorageDB() {
+            try {
+                const request = indexedDB.open("HypervisorDB", 1);
+                request.onupgradeneeded = function(e) {
+                    db = e.target.result;
+                    if (!db.objectStoreNames.contains("disks")) {
+                        db.createObjectStore("disks");
+                    }
+                };
+                request.onsuccess = function(e) {
+                    db = e.target.result;
+                    if (typeof appendSerialLog === "function") {
+                        appendSerialLog("[HypervisorJS] IndexedDB Storage connected.");
+                    }
+                    updateStorageUsage();
+                };
+                request.onerror = function(e) {
+                    console.error("IndexedDB initialization failed:", e);
+                };
+            } catch (err) {
+                console.warn("IndexedDB not accessible in this context:", err);
+            }
+        }
+
+        function updateStorageUsage() {
+            if (!db) return;
+            try {
+                const transaction = db.transaction(["disks"], "readonly");
+                const store = transaction.objectStore("disks");
+                const request = store.get("primary_hdd");
+                request.onsuccess = function() {
+                    const data = request.result;
+                    const badge = document.getElementById("storage-usage-badge");
+                    const cachedOpt = document.getElementById("cached-option");
+                    const statusDetail = document.getElementById("hdd-status-detail");
+                    if (data && data.byteLength) {
+                        const mb = (data.byteLength / (1024 * 1024)).toFixed(1);
+                        if (badge) badge.innerText = `${mb} MB stored`;
+                        if (cachedOpt) {
+                            cachedOpt.disabled = false;
+                            cachedOpt.innerText = `💾 Boot Cached Virtual HDD (${mb} MB)`;
+                        }
+                        if (statusDetail) statusDetail.innerText = `Active Cache (${mb} MB in IndexedDB)`;
+                    } else {
+                        if (badge) badge.innerText = "0 MB used";
+                        if (cachedOpt) {
+                            cachedOpt.disabled = true;
+                            cachedOpt.innerText = "💾 Boot Cached Virtual HDD (0 MB)";
+                        }
+                        if (statusDetail) statusDetail.innerText = "Ready (Blank Sparse Disk)";
+                    }
+                };
+            } catch (err) {
+                console.warn("Failed to check storage usage:", err);
+            }
+        }
+
+        // Generates a 1.44MB bootable floppy disk image with 16-bit x86 Real-Mode Kernel in JS
+        function createEmbeddedOSImage() {
+            const size = 1474560; // Standard 1.44MB Floppy
+            const img = new Uint8Array(size);
+
+            // 16-bit x86 Boot Sector Op-Codes
+            // Boot sector is loaded by BIOS at 0x0000:0x7C00
+            const code = [
+                0xFA,                         // 0x7C00: CLI (Disable interrupts)
+                0x31, 0xC0,                   // 0x7C01: XOR AX, AX
+                0x8E, 0xD8,                   // 0x7C03: MOV DS, AX
+                0x8E, 0xC0,                   // 0x7C05: MOV ES, AX
+                0x8E, 0xD0,                   // 0x7C07: MOV SS, AX
+                0xBC, 0x00, 0x7C,             // 0x7C09: MOV SP, 0x7C00
+                0xFB,                         // 0x7C0C: STI (Re-enable interrupts)
+                0xBE, 0x20, 0x7C,             // 0x7C0D: MOV SI, 0x7C20 -> Pointer to text at offset 0x20 in memory segment 0x0000:0x7C00
+                0xAC,                         // 0x7C10: LODSB (Load byte at [SI] into AL and increment SI)
+                0x84, 0xC0,                   // 0x7C11: TEST AL, AL
+                0x74, 0x09,                   // 0x7C13: JZ +9 -> Jump to halt loop at 0x7C1E if null terminator
+                0xB4, 0x0E,                   // 0x7C15: MOV AH, 0x0E (INT 0x10 Teletype character print)
+                0xBB, 0x07, 0x00,             // 0x7C17: MOV BX, 0x0007 (Light grey text attribute)
+                0xCD, 0x10,                   // 0x7C1A: INT 0x10 (Call BIOS video service)
+                0xEB, 0xF2,                   // 0x7C1C: JMP -14 -> Loop back to LODSB at 0x7C10
+                0xF4,                         // 0x7C1E: HLT (Halt CPU)
+                0xEB, 0xFD                    // 0x7C1F: JMP -3 -> Spin halt loop
+            ];
+
+            const message = "========================================================\r\n" +
+                            "   HYPERVISOR-JS : EMBEDDED X86 REAL-MODE KERNEL v1.0   \r\n" +
+                            "========================================================\r\n\r\n" +
+                            "[+] CPU Mode    : 16-bit x86 Real Mode\r\n" +
+                            "[+] SeaBIOS     : Bootloader & Interrupt Vectors Initialized\r\n" +
+                            "[+] Memory      : Wasm ArrayBuffer Physical RAM Active\r\n" +
+                            "[+] Status      : Running inside web browser sandbox!\r\n\r\n" +
+                            "You can upload any local ISO/IMG operating system file using\r\n" +
+                            "the dropdown menu on the left panel to boot Linux, Windows or DOS!\r\n\r\n" +
+                            "Press any key to test PS/2 Keyboard scancode input...\r\n\0";
+
+            for (let i = 0; i < code.length; i++) {
+                img[i] = code[i];
+            }
+
+            const msgOffset = 0x20;
+            for (let i = 0; i < message.length; i++) {
+                img[msgOffset + i] = message.charCodeAt(i);
+            }
+
+            // MBR Boot Magic Signature
+            img[510] = 0x55;
+            img[511] = 0xAA;
+
+            return img.buffer;
+        }
+
+        // Multi-CDN Asset Pre-Fetcher to avoid silent cross-origin loader failures inside Wasm
+        async function fetchAssetWithFallback(assetName, pathSuffixes) {
+            appendSerialLog(`[HypervisorJS] Fetching ${assetName}...`);
+            const cdnBases = [
+                "https://cdn.jsdelivr.net/gh/copy/v86@master/",
+                "https://raw.githubusercontent.com/copy/v86/master/",
+                "https://cdn.jsdelivr.net/npm/v86@latest/",
+                "https://unpkg.com/v86@latest/",
+                "https://copy.sh/v86/"
+            ];
+
+            for (const base of cdnBases) {
+                for (const suffix of pathSuffixes) {
+                    const url = base + suffix;
+                    try {
+                        const resp = await fetch(url);
+                        if (resp.ok) {
+                            const buf = await resp.arrayBuffer();
+                            appendSerialLog(`[HypervisorJS] Loaded ${assetName} (${(buf.byteLength/1024).toFixed(0)} KB) via CORS CDN`);
+                            return buf;
+                        }
+                    } catch (e) {}
+
+                    try {
+                        const proxyUrl = `https://corsproxy.io/?` + encodeURIComponent(url);
+                        const resp = await fetch(proxyUrl);
+                        if (resp.ok) {
+                            const buf = await resp.arrayBuffer();
+                            appendSerialLog(`[HypervisorJS] Loaded ${assetName} via proxy (${(buf.byteLength/1024).toFixed(0)} KB)`);
+                            return buf;
+                        }
+                    } catch (e) {}
+                }
+            }
+            throw new Error(`Failed to load required asset: ${assetName}`);
+        }
+
+        // Preset Image URLs (CDN links with fallback support)
+        const OS_PRESETS = {
+            kolibrios: {
+                name: "KolibriOS 0.7.7",
+                type: "fda",
+                urls: [
+                    "https://cdn.jsdelivr.net/gh/copy/images@master/kolibri.img",
+                    "https://raw.githubusercontent.com/copy/images/master/kolibri.img",
+                    "https://copy.sh/v86/images/kolibri.img"
+                ],
+                desc: "Written entirely in x86 Assembly. Features full GUI, games, paint, text editor."
+            },
+            freedos: {
+                name: "FreeDOS 1.3",
+                type: "fda",
+                urls: [
+                    "https://cdn.jsdelivr.net/gh/copy/images@master/freedos722.img",
+                    "https://raw.githubusercontent.com/copy/images/master/freedos722.img",
+                    "https://copy.sh/v86/images/freedos722.img"
+                ],
+                desc: "Open source MS-DOS compatible OS."
+            },
+            tinycore: {
+                name: "Tiny Core Linux",
+                type: "cdrom",
+                urls: [
+                    "https://cdn.jsdelivr.net/gh/copy/images@master/linux4.iso",
+                    "https://raw.githubusercontent.com/copy/images/master/linux4.iso",
+                    "https://cdn.jsdelivr.net/gh/copy/images@master/linux3.iso",
+                    "https://copy.sh/v86/images/linux4.iso"
+                ],
+                desc: "Minimalist Linux kernel with FLWM desktop."
+            }
+        };
+
+        // Initialize Lucide Icons
+        lucide.createIcons();
+
+        async function ensureV86Loaded() {
+            if (window.V86Starter || window.V86) return true;
+            appendSerialLog("[HypervisorJS] Waiting for v86 library script...");
+            for (let i = 0; i < 30; i++) {
+                if (window.V86Starter || window.V86) return true;
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return !!(window.V86Starter || window.V86);
+        }
+
+        async function fetchImageWithFallback(urls, description) {
+            appendSerialLog(`[HypervisorJS] Fetching OS image (${description})...`);
+            
+            if (typeof urls === 'string') urls = [urls];
+
+            for (const url of urls) {
+                // Attempt 1: Direct CORS fetch from URL mirror
+                try {
+                    const resp = await fetch(url, { mode: 'cors' });
+                    if (resp.ok) {
+                        const buf = await resp.arrayBuffer();
+                        appendSerialLog(`[HypervisorJS] Image downloaded successfully (${(buf.byteLength/(1024*1024)).toFixed(1)} MB).`);
+                        return buf;
+                    }
+                } catch (e) {
+                    console.warn("Direct fetch failed for " + url, e);
+                }
+
+                // Attempt 2: Proxy Fallback for this URL
+                try {
+                    appendSerialLog(`[HypervisorJS] Trying proxy mirror for asset...`);
+                    const proxyUrl = `https://corsproxy.io/?` + encodeURIComponent(url);
+                    const resp = await fetch(proxyUrl);
+                    if (resp.ok) {
+                        const buf = await resp.arrayBuffer();
+                        appendSerialLog(`[HypervisorJS] Downloaded via proxy mirror (${(buf.byteLength/(1024*1024)).toFixed(1)} MB).`);
+                        return buf;
+                    }
+                } catch (e) {
+                    console.warn("Proxy fetch failed:", e);
+                }
+            }
+
+            throw new Error("Unable to download remote OS image across available mirrors.");
+        }
+
+        async function startVM() {
+            const selectedPreset = document.getElementById("preset-selector").value;
+            const ramSize = parseInt(document.getElementById("ram-slider").value) * 1024 * 1024;
+            const splash = document.getElementById("vm-offline-splash");
+            
+            appendSerialLog("[HypervisorJS] Initializing x86 Virtual Machine instance...");
+            
+            const loaded = await ensureV86Loaded();
+            if (!loaded) {
+                showToast("Failed to load v86 emulation engine script.", "error");
+                appendSerialLog("[ERROR] Could not resolve V86Starter or V86 constructor.");
+                return;
+            }
+
+            // Pre-fetch SeaBIOS, VGA BIOS and Wasm Core as local Blobs
+            let seabiosBlobUrl, vgabiosBlobUrl, wasmBlobUrl;
+            try {
+                const seabiosBuf = await fetchAssetWithFallback("SeaBIOS", ["bios/seabios.bin", "build/seabios.bin"]);
+                const vgabiosBuf = await fetchAssetWithFallback("VGA BIOS", ["bios/vgabios.bin", "build/vgabios.bin"]);
+                const wasmBuf = await fetchAssetWithFallback("Wasm Core Engine", ["build/v86.wasm"]);
+
+                seabiosBlobUrl = URL.createObjectURL(new Blob([seabiosBuf], { type: "application/octet-stream" }));
+                vgabiosBlobUrl = URL.createObjectURL(new Blob([vgabiosBuf], { type: "application/octet-stream" }));
+                wasmBlobUrl = URL.createObjectURL(new Blob([wasmBuf], { type: "application/wasm" }));
+            } catch (assetErr) {
+                showToast(assetErr.message, "error");
+                appendSerialLog(`[ERROR] ${assetErr.message}`);
+                return;
+            }
+
+            const V86Engine = window.V86Starter || window.V86;
+            
+            // Clear screen container to ensure clean canvas creation
+            const screenContainer = document.getElementById("screen_container");
+            screenContainer.innerHTML = "";
+
+            let v86Options = {
+                wasm_path: wasmBlobUrl,
+                memory_size: ramSize,
+                vga_memory_size: 16 * 1024 * 1024, // Expanded VRAM for high-res VBE graphics modes
+                screen_container: screenContainer,
+                bios: { url: seabiosBlobUrl },
+                vga_bios: { url: vgabiosBlobUrl },
+                autostart: true,
+            };
+
+            try {
+                // Disk & Boot configuration
+                if (selectedPreset === "embedded_os") {
+                    v86Options.fda = { buffer: createEmbeddedOSImage() };
+                } else if (selectedPreset === "custom_file") {
+                    if (!customFileBuffer) {
+                        showToast("Please select a valid image file to boot.", "error");
+                        return;
+                    }
+                    const mountType = document.getElementById("mount-type-selector").value;
+                    const lowerName = customFileName.toLowerCase();
+                    let target = mountType;
+
+                    if (target === "auto") {
+                        if (lowerName.endsWith(".iso")) {
+                            target = "cdrom";
+                        } else if (customFileBuffer.byteLength <= 2949120 && (lowerName.includes("floppy") || lowerName.endsWith(".fda"))) {
+                            target = "fda";
+                        } else {
+                            target = "hda";
+                        }
+                    }
+
+                    if (target === "cdrom") {
+                        v86Options.cdrom = { buffer: customFileBuffer };
+                    } else if (target === "fda") {
+                        v86Options.fda = { buffer: customFileBuffer };
+                    } else {
+                        v86Options.hda = { buffer: customFileBuffer };
+                    }
+                } else if (selectedPreset === "cached_option") {
+                    const cachedDisk = await loadDiskFromIndexedDB();
+                    if (!cachedDisk) {
+                        showToast("No cached virtual hard drive found in IndexedDB.", "error");
+                        return;
+                    }
+                    v86Options.hda = { buffer: cachedDisk };
+                } else if (OS_PRESETS[selectedPreset]) {
+                    const preset = OS_PRESETS[selectedPreset];
+                    const buf = await fetchImageWithFallback(preset.urls, preset.name);
+                    if (preset.type === "fda") {
+                        v86Options.fda = { buffer: buf };
+                    } else if (preset.type === "cdrom") {
+                        v86Options.cdrom = { buffer: buf };
+                    } else {
+                        v86Options.hda = { buffer: buf };
+                    }
+                }
+
+                appendSerialLog("[HypervisorJS] Launching WebAssembly CPU core...");
+                emulator = new V86Engine(v86Options);
+
+                // Serial port output listener
+                emulator.add_listener("serial0-output-char", function(char) {
+                    appendSerialChar(char);
+                });
+
+                // Periodic telemetry counter
+                if (mhzInterval) clearInterval(mhzInterval);
+                let lastInstr = 0;
+                mhzInterval = setInterval(() => {
+                    if (emulator && isRunning && !isPaused) {
+                        const current = emulator.get_instruction_counter ? emulator.get_instruction_counter() : 0;
+                        const diff = current - lastInstr;
+                        lastInstr = current;
+                        const mhz = (diff / 1000000).toFixed(1);
+                        document.getElementById("emulated-mhz").innerText = `~${mhz} MHz`;
+                        document.getElementById("instr-count").innerText = current.toLocaleString();
+                    }
+                }, 1000);
+
+                // Auto-save storage when sectors are written to primary HDD
+                emulator.add_listener("disk-write", function() {
+                    if (emulator && emulator.save_disk) {
+                        emulator.save_disk().then(buffer => saveDiskToIndexedDB(buffer)).catch(() => {});
+                    }
+                });
+
+                // Update UI state
+                isRunning = true;
+                isPaused = false;
+                splash.classList.add("hidden");
+                updatePowerUI(true);
+                showToast("x86 System booted successfully!", "success");
+
+                // Ensure initial keyboard focus on screen container
+                focusVMScreen();
+
+                // Enable mouse lock hint
+                document.getElementById("mouse-lock-hint").classList.remove("hidden");
+                setTimeout(() => {
+                    document.getElementById("mouse-lock-hint").classList.add("hidden");
+                }, 5000);
+
+            } catch (err) {
+                console.error("VM Boot Error:", err);
+                appendSerialLog(`[ERROR] VM Boot failed: ${err.message}`);
+                showToast("Failed to initialize Wasm Emulator", "error");
+            }
+        }
+
+        function stopVM() {
+            if (emulator) {
+                emulator.destroy();
+                emulator = null;
+            }
+            if (mhzInterval) clearInterval(mhzInterval);
+
+            isRunning = false;
+            isPaused = false;
+
+            document.getElementById("vm-offline-splash").classList.remove("hidden");
+            updatePowerUI(false);
+            appendSerialLog("[HypervisorJS] System powered down.");
+            showToast("VM Powered Off", "info");
+        }
+
+        function pauseResumeVM() {
+            if (!emulator || !isRunning) return;
+            if (isPaused) {
+                emulator.run();
+                isPaused = false;
+                document.getElementById("pause-text").innerText = "Pause";
+                showToast("VM Resumed", "info");
+            } else {
+                emulator.stop();
+                isPaused = true;
+                document.getElementById("pause-text").innerText = "Resume";
+                showToast("VM Paused", "info");
+            }
+        }
+
+        function resetVM() {
+            if (!emulator) return;
+            emulator.restart();
+            appendSerialLog("[HypervisorJS] System hard reset triggered.");
+            showToast("VM Hard Reset", "info");
+        }
+
+        function updatePowerUI(active) {
+            const btn = document.getElementById("btn-power");
+            const btnText = document.getElementById("power-btn-text");
+            const indicator = document.getElementById("status-indicator");
+            const statusText = document.getElementById("status-text");
+            const pauseBtn = document.getElementById("pause-btn");
+            const resetBtn = document.getElementById("reset-btn");
+
+            if (active) {
+                btn.className = "flex items-center space-x-2 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-sm transition-all shadow-lg shadow-rose-600/20 active:scale-95";
+                btnText.innerText = "Shutdown VM";
+                indicator.className = "w-2 h-2 rounded-full bg-brand-400 animate-ping";
+                statusText.innerText = "SYSTEM RUNNING";
+                statusText.className = "font-mono text-brand-400 glow-green";
+                pauseBtn.disabled = false;
+                resetBtn.disabled = false;
+            } else {
+                btn.className = "flex items-center space-x-2 px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-slate-950 font-semibold text-sm transition-all shadow-lg shadow-brand-600/20 active:scale-95";
+                btnText.innerText = "Boot VM";
+                indicator.className = "w-2 h-2 rounded-full bg-slate-500";
+                statusText.innerText = "SYSTEM OFFLINE";
+                statusText.className = "font-mono text-slate-400";
+                pauseBtn.disabled = true;
+                resetBtn.disabled = true;
+            }
+        }
+
+        function saveDiskToIndexedDB(arrayBuffer) {
+            if (!db) return;
+            const transaction = db.transaction(["disks"], "readwrite");
+            const store = transaction.objectStore("disks");
+            store.put(arrayBuffer, "primary_hdd");
+            transaction.oncomplete = () => {
+                updateStorageUsage();
+                showToast("Disk changes saved to IndexedDB cache!", "success");
+            };
+        }
+
+        function loadDiskFromIndexedDB() {
+            return new Promise((resolve) => {
+                if (!db) return resolve(null);
+                const transaction = db.transaction(["disks"], "readonly");
+                const store = transaction.objectStore("disks");
+                const request = store.get("primary_hdd");
+                request.onsuccess = () => resolve(request.result || null);
+                request.onerror = () => resolve(null);
+            });
+        }
+
+        async function downloadDiskImage() {
+            if (emulator && isRunning) {
+                // Export live state disk buffer from emulator
+                emulator.save_disk().then((buffer) => {
+                    triggerDownload(buffer, "hypervisor_disk.img");
+                    saveDiskToIndexedDB(buffer);
+                });
+            } else {
+                const cachedDisk = await loadDiskFromIndexedDB();
+                if (cachedDisk) {
+                    triggerDownload(cachedDisk, "cached_hypervisor_disk.img");
+                } else {
+                    showToast("No active or cached disk image to download.", "error");
+                }
+            }
+        }
+
+        function triggerDownload(buffer, filename) {
+            const blob = new Blob([buffer], { type: "application/octet-stream" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast(`Downloading ${filename}...`, "success");
+        }
+
+        function clearDiskCache() {
+            if (!db) return;
+            const transaction = db.transaction(["disks"], "readwrite");
+            const store = transaction.objectStore("disks");
+            store.delete("primary_hdd");
+            transaction.oncomplete = () => {
+                updateStorageUsage();
+                showToast("IndexedDB disk cache cleared", "info");
+            };
+        }
+
+        function sendCtrlAltDel() {
+            if (!emulator) return;
+            emulator.keyboard_send_scancodes([
+                0x1D, // Ctrl
+                0x38, // Alt
+                0x53, // Delete
+                0x1D | 0x80,
+                0x38 | 0x80,
+                0x53 | 0x80
+            ]);
+            showToast("Sent Ctrl+Alt+Del signal", "info");
+        }
+
+        // Send individual key scancode to emulator (useful if keyboard focus was dropped)
+        function sendKeyScancode(code) {
+            if (!emulator || !isRunning) {
+                showToast("Boot VM first to send input", "error");
+                return;
+            }
+            focusVMScreen();
+            // Send key down then key up scancodes
+            emulator.keyboard_send_scancodes([code, code | 0x80]);
+        }
+
+        function focusVMScreen() {
+            const screenContainer = document.getElementById("screen_container");
+            if (screenContainer) {
+                screenContainer.focus();
+            }
+        }
+
+        function toggleRenderMode() {
+            isSmoothRendering = !isSmoothRendering;
+            const container = document.getElementById("screen_container");
+            const canvases = container.querySelectorAll("canvas");
+            const btnLabel = document.getElementById("render-mode-label");
+            
+            canvases.forEach(canvas => {
+                if (isSmoothRendering) {
+                    canvas.classList.remove("rendering-pixelated");
+                } else {
+                    canvas.classList.add("rendering-pixelated");
+                }
+            });
+
+            if (isSmoothRendering) {
+                if (btnLabel) btnLabel.innerText = "Smooth Font";
+                showToast("Switched to Smooth Font Interpolation", "info");
+            } else {
+                if (btnLabel) btnLabel.innerText = "Pixelated";
+                showToast("Switched to Pixelated Rendering Mode", "info");
+            }
+        }
+
+        function toggleAspectMode() {
+            const container = document.getElementById("screen_container");
+            const canvases = container.querySelectorAll("canvas");
+            const aspectLabel = document.getElementById("aspect-label");
+
+            if (aspectMode === "fit") {
+                aspectMode = "stretch";
+                canvases.forEach(c => {
+                    c.style.maxWidth = "100%";
+                    c.style.width = "100%";
+                    c.style.height = "100%";
+                });
+                if (aspectLabel) aspectLabel.innerText = "Stretch Fill";
+                showToast("Aspect Mode: Stretch Fill", "info");
+            } else if (aspectMode === "stretch") {
+                aspectMode = "native";
+                canvases.forEach(c => {
+                    c.style.maxWidth = "none";
+                    c.style.width = "auto";
+                    c.style.height = "auto";
+                });
+                if (aspectLabel) aspectLabel.innerText = "1:1 Native";
+                showToast("Aspect Mode: 1:1 Native Resolution", "info");
+            } else {
+                aspectMode = "fit";
+                canvases.forEach(c => {
+                    c.style.maxWidth = "100%";
+                    c.style.width = "auto";
+                    c.style.height = "auto";
+                });
+                if (aspectLabel) aspectLabel.innerText = "Fit Aspect";
+                showToast("Aspect Mode: Fit Aspect Ratio", "info");
+            }
+        }
+
+        function toggleCRT() {
+            const wrapper = document.getElementById("screen-wrapper");
+            wrapper.classList.toggle("crt-effect");
+            const btn = document.getElementById("crt-btn");
+            btn.classList.toggle("bg-brand-500/20");
+            btn.classList.toggle("text-brand-400");
+        }
+
+        function toggleFullscreen() {
+            const elem = document.getElementById("screen-wrapper") || document.getElementById("screen_container");
+            if (!elem) return;
+
+            if (document.fullscreenElement || document.webkitFullscreenElement) {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen().catch(err => console.warn("Exit fullscreen failed:", err));
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                }
+            } else {
+                try {
+                    const req = elem.requestFullscreen ? elem.requestFullscreen() : (elem.webkitRequestFullscreen ? elem.webkitRequestFullscreen() : null);
+                    if (req && typeof req.catch === "function") {
+                        req.catch(err => {
+                            console.warn("Fullscreen request denied by browser/iframe policy:", err);
+                            showToast("Fullscreen denied by browser or iframe policy", "error");
+                        });
+                    }
+                } catch (err) {
+                    console.warn("Fullscreen request error:", err);
+                    showToast("Fullscreen not supported in this frame", "error");
+                }
+            }
+        }
+
+        function lockMouse() {
+            if (!emulator) return;
+            emulator.lock_mouse();
+        }
+
+        // Host Clipboard to VM Text Injection
+        function pasteTextToVM(text) {
+            if (!emulator || !isRunning) {
+                showToast("Boot VM first before pasting text", "error");
+                return;
+            }
+            if (!text || text.length === 0) return;
+
+            // Direct v86 string injector if available
+            if (typeof emulator.keyboard_send_text === "function") {
+                emulator.keyboard_send_text(text);
+            } else {
+                // Fallback ASCII scancode typist
+                sendTextAsScancodes(text);
+            }
+            showToast(`Pasted ${text.length} character(s) to VM`, "success");
+        }
+
+        async function handleClipboardPaste() {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (text) {
+                    pasteTextToVM(text);
+                } else {
+                    showToast("Clipboard is empty", "info");
+                }
+            } catch (err) {
+                showToast("Clipboard access denied. Use Ctrl+V inside VM window.", "error");
+            }
+        }
+
+        // Character-to-PS/2 scancode converter fallback
+        function sendTextAsScancodes(str) {
+            const charToScancode = {
+                'a': 0x1E, 'b': 0x30, 'c': 0x2E, 'd': 0x20, 'e': 0x12, 'f': 0x21, 'g': 0x22,
+                'h': 0x23, 'i': 0x17, 'j': 0x24, 'k': 0x25, 'l': 0x26, 'm': 0x32, 'n': 0x31,
+                'o': 0x18, 'p': 0x19, 'q': 0x10, 'r': 0x13, 's': 0x1F, 't': 0x14, 'u': 0x16,
+                'v': 0x2F, 'w': 0x11, 'x': 0x2D, 'y': 0x15, 'z': 0x2C,
+                '1': 0x02, '2': 0x03, '3': 0x04, '4': 0x05, '5': 0x06, '6': 0x07, '7': 0x08,
+                '8': 0x09, '9': 0x0A, '0': 0x0B, ' ': 0x39, '\r': 0x1C, '\n': 0x1C, '\t': 0x0F
+            };
+
+            for (let i = 0; i < str.length; i++) {
+                const char = str[i].toLowerCase();
+                const code = charToScancode[char];
+                if (code) {
+                    setTimeout(() => {
+                        if (emulator) emulator.keyboard_send_scancodes([code, code | 0x80]);
+                    }, i * 15);
+                }
+            }
+        }
+
+        // Automatically capture mouse on entering Fullscreen mode
+        document.addEventListener("fullscreenchange", () => {
+            if (document.fullscreenElement || document.webkitFullscreenElement) {
+                if (emulator && isRunning) {
+                    setTimeout(() => lockMouse(), 150);
+                }
+            }
+        });
+
+        // Global Paste Event Handlers
+        document.addEventListener("paste", (e) => {
+            if (!emulator || !isRunning) return;
+            const text = (e.clipboardData || window.clipboardData)?.getData("text");
+            if (text) {
+                e.preventDefault();
+                pasteTextToVM(text);
+            }
+        });
+
+        // Keydown listener for Ctrl+V / Cmd+V
+        document.addEventListener("keydown", (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
+                if (emulator && isRunning) {
+                    navigator.clipboard?.readText().then(text => {
+                        if (text && !e.defaultPrevented) {
+                            pasteTextToVM(text);
+                        }
+                    }).catch(() => {});
+                }
+            }
+        });
+
+        // Initialize IndexedDB on page load
+        window.addEventListener("DOMContentLoaded", () => {
+            initStorageDB();
+        });
+    </script>
+</body>
+</html>
